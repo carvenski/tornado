@@ -1,0 +1,58 @@
+
+
+Tornado异步--原理以及普通同步方法改异步
+
+但是对于普通的阻塞操作——比如MySql查询，甚至是简单的一句time.sleep--怎么让其不阻塞呢？
+
+回答这个问题首先要了解Tornado异步的原理。Tornado异步的核心是ioloop.py和iostream.py这两个文件。ioloop.py实现了一个处理I/O事件的循环，iostream封装了非阻塞的socket并把I/O事件注册到ioloop上。Tornado的异步在linux平台基于epoll，它是基于事件而非轮询的，这是其高效的原因（windows平台没有epoll，tornado只能使用select，效率比epoll低）。
+
+ps：tornado异步的原理我觉得没有完全理解，但简单的讲就是这样了。关于epoll和socket可以看这里。
+
+知道原理后，再看这个问题。首先要说：Mysql查询和time.sleep这两个操作是不同类型的阻塞操作。
+
+python进行Mysql查询需要建立socket连接，这就可以通过iostream将其改为异步，但是现在通用的mysql库使用c写的python模块，socket部分由c写完并编译，就不能修改了。如果是用python写的mysql库（如myconnpy），使用的是python的socket，是可以改为异步的库。现在mongodb和pgsql都有异步的python驱动。
+
+再说time.sleep，这种阻塞操作不需要socket，要将其改为异步，只能使用队列，线程等方式。这里提供几种方式：
+
+第一种使用celery，它使用RabbitMQ做后端，使用队列的方式实现异步，对应tornado有开源的tornado-celery，可以实现异步：
+
+from celery import Celery
+import tcelery
+from tornado import gen.coroutine
+
+celery = Celery('tasks', backend='redis://localhost', broker='amqp://')
+
+@celery.task
+def test(strs):
+    time.sleep(5)
+    return strs
+
+class MainHandler(tornado.web.RequestHandler):
+    @gen.coroutine
+    def get(self):
+        result = yield tcelery.celery_task(test, "hello world")
+        self.write("%s" % result )
+第二种使用concurrent.futures，这个并发库在python3自带 ，在python2需要安装sudo pip install futures。
+这种方法是使用线程池或者进程池的方式实现异步的，它有ThreadPoolExecutor和ProcessPoolExecutor，要求Handler类要有一个名为executor的属性，
+指向一个Executor对象，代码如下：
+
+from concurrent.futures import ThreadPoolExecutor
+
+class SleepHandler(tornado.web.RequestHandler):
+    executor = ThreadPoolExecutor(2)
+
+    @tornado.web.asynchronous
+    @tornado.gen.coroutine
+    def get(self):
+        res = yield self.sleep()
+        self.write("sleep %s s" % res)
+        self.finish()
+
+    @run_on_executor
+    def sleep(self):
+        time.sleep(5)
+        return 5
+上面ThreadPoolExecutor(2)，建立了size为2的一个线程池。
+
+这样SleepHandler就不会阻塞其他Handler。
+
